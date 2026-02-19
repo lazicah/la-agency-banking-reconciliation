@@ -1,14 +1,13 @@
-# AI-Powered Bank Reconciliation API
-**Liberty Assured Group — Agency Banking Automation**
+**Liberty Assured Group — # AI-Powered Bank Reconciliation API**
 
-Converts your Jupyter notebook reconciliation logic into a production API with AI-powered discrepancy analysis.
+Converts Jupyter notebook reconciliation logic into a production API with AI-powered discrepancy analysis.
 
 ---
 
 ## What This Does
 
-✅ **Converts your manual reconciliation to an API**
-- Takes your existing pandas/Excel logic from Jupyter notebook
+✅ **Converts manual reconciliation to an API**
+- Takes the existing pandas/Excel logic from Jupyter notebook
 - Wraps it in FastAPI so Make.com can call it
 - Returns structured JSON results
 
@@ -34,7 +33,7 @@ Make.com Scenario
 ├─ Get backend data from Google Sheets
 ├─ Get bank statement from Google Sheets
 ├─ POST to FastAPI → /reconcile
-│  ├─ Your existing reconciliation logic
+│  ├─ Existing reconciliation logic
 │  ├─ Match SEND_BANK_TRANSFER (ref_1, ref_2)
 │  ├─ Match FUND_BANK_TRANSFER (session_id)
 │  ├─ Map reversals to failed transactions
@@ -160,7 +159,7 @@ Health check endpoint.
 
 ---
 
-## How AI Improves Your Reconciliation
+## How AI Improves Reconciliation
 
 ### Before (Manual Process):
 
@@ -183,7 +182,7 @@ Health check endpoint.
    - Email summary ready ✅
 3. **Time: 2 minutes**
 
-### AI Understands Your Context:
+### AI Understands The Context:
 
 The AI knows:
 - SEND_BANK_TRANSFER with no ref → probably failed
@@ -194,7 +193,7 @@ The AI knows:
 
 ---
 
-## Reconciliation Logic (From Your Notebook)
+## Reconciliation Logic (From Jupyter Notebook)
 
 ### 1. SEND_BANK_TRANSFER Matching
 
@@ -299,11 +298,11 @@ Edit `ReconciliationEngine` class in `main.py`:
 
 ```python
 def reconcile_custom_type(self):
-    """Your custom matching logic"""
+    """Custom matching logic"""
     trans = self.backend_prepared
     bank = self.bank_prepared
     
-    # Your matching logic here
+    # Matching logic goes here
     matched = ...
     unmatched = ...
     
@@ -324,7 +323,7 @@ prompt = f"""
 You are analyzing...
 
 FOCUS ON:
-- [Your specific concerns]
+- [Specific concerns]
 - [Industry-specific patterns]
 - [Regulatory requirements]
 
@@ -340,7 +339,7 @@ FOCUS ON:
 A: Set `ANTHROPIC_API_KEY` environment variable
 
 **Q: "KeyError: 'transaction_type'"**
-A: Your data is missing required columns. Check column names match exactly.
+A: Data is missing required columns. Check column names match exactly.
 
 **Q: Reconciliation takes too long**
 A: Split large datasets into batches. Process one month at a time.
