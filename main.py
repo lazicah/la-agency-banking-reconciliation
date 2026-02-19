@@ -4,7 +4,7 @@ Liberty Assured Group
 
 ARCHITECTURE:
 1. Make.com sends ONLY bank statement + period
-2. API fetches backend data from YOUR Postgres DB (via VPN)
+2. API fetches backend data from the Postgres DB (via VPN)
 3. Runs reconciliation
 4. Returns AI analysis
 """
@@ -48,7 +48,7 @@ app.add_middleware(
 # AI
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
-# YOUR Agency Banking Postgres Database
+#Agency Banking Postgres Database
 PG_HOST = os.getenv("PG_HOST", "")
 PG_PORT = os.getenv("PG_PORT", "5432")
 PG_DATABASE = os.getenv("PG_DATABASE", "")
@@ -77,12 +77,12 @@ class ReconcileResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────
-# FETCH BACKEND DATA FROM YOUR POSTGRES DATABASE
+# FETCH BACKEND DATA FROM POSTGRES DATABASE
 # ─────────────────────────────────────────────────────────────────
 
 def get_backend_data_from_postgres(period: str) -> pd.DataFrame:
     """
-    Connects to YOUR Postgres database and fetches backend transactions.
+    Connects to Postgres database and fetches backend transactions.
     Requires VPN connection to be active.
     """
     
@@ -126,7 +126,7 @@ def get_backend_data_from_postgres(period: str) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────
-# RECONCILIATION ENGINE (Your Jupyter logic)
+# RECONCILIATION ENGINE
 # ─────────────────────────────────────────────────────────────────
 
 class ReconciliationEngine:
@@ -435,7 +435,7 @@ async def reconcile(request: ReconcileRequest):
     run_id = f"RUN_{request.period}_{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:6].upper()}"
     
     try:
-        # 1. Fetch backend from YOUR Postgres
+        # 1. Fetch backend from Postgres
         print(f"🔄 Fetching backend from Postgres for {request.period}...")
         backend_df = get_backend_data_from_postgres(request.period)
         
