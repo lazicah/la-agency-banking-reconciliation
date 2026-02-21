@@ -12,3 +12,5 @@ venv/
 # IDEs
 .vscode/
 .idea/
+
+Makefile
