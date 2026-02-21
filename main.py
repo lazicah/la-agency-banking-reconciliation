@@ -3,7 +3,7 @@ main.py — FastAPI Reconciliation Service
 Liberty Assured Group
 
 ARCHITECTURE:
-1. Make.com sends ONLY bank statement + period
+1. Make.com sends ONLY bank statement + date range
 2. API fetches backend data from the Postgres DB (via VPN)
 3. Runs reconciliation
 4. Returns AI analysis
@@ -15,21 +15,20 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict
 import pandas as pd
 import numpy as np
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import uuid
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import anthropic
 import os
 import traceback
+import requests
 from dotenv import load_dotenv
 load_dotenv()
 
 
 app = FastAPI(
     title="Agency Banking Reconciliation API",
-    description="Liberty Assured — Fetches backend from Postgres db, receives bank statement from Make",
+    description="Liberty Assured — Fetches backend from API, receives bank statement from Make",
     version="1.0.0"
 )
 
@@ -48,12 +47,9 @@ app.add_middleware(
 # AI
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 
-#Agency Banking Postgres Database
-PG_HOST = os.getenv("PG_HOST", "")
-PG_PORT = os.getenv("PG_PORT", "5432")
-PG_DATABASE = os.getenv("PG_DATABASE", "")
-PG_USER = os.getenv("PG_USER", "")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "")
+# Agency Banking Backend API
+BACKEND_API_BASE = os.getenv("BACKEND_API_BASE", "")
+BACKEND_API_TOKEN = os.getenv("BACKEND_API_KEY", "")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -61,14 +57,16 @@ PG_PASSWORD = os.getenv("PG_PASSWORD", "")
 # ─────────────────────────────────────────────────────────────────
 
 class ReconcileRequest(BaseModel):
-    period: str  # "2026-01"
+    start_date: str  # "2026-01-01"
+    end_date: str  # "2026-01-31"
     bank_data: List[Dict]  # Bank statement from Make.com
     run_ai_analysis: bool = True
 
 
 class ReconcileResponse(BaseModel):
     run_id: str
-    period: str
+    start_date: str
+    end_date: str
     status: str
     summary: Dict
     ai_analysis: Optional[str] = None
@@ -77,52 +75,54 @@ class ReconcileResponse(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────────
-# FETCH BACKEND DATA FROM POSTGRES DATABASE
+# FETCH BACKEND DATA FROM BACKEND API
 # ─────────────────────────────────────────────────────────────────
 
-def get_backend_data_from_postgres(period: str) -> pd.DataFrame:
+BACKEND_TRANSACTION_TYPES = [
+    "SEND_BANK_TRANSFER",
+    # "SEND_LIBERTY_COMMISSION",
+    # "REVERSAL_BANK_TRANSFER",
+    # "FUND_BANK_TRANSFER",
+    # "ELECTRONIC_TRANSFER_LEVY",
+]
+
+
+def get_backend_data_from_api(start_date: str, end_date: str) -> pd.DataFrame:
     """
-    Connects to Postgres database and fetches backend transactions.
-    Requires VPN connection to be active.
+    Fetches backend transactions via backend API.
     """
-    
-    # Calculate date range
-    start_date = f"{period}-01"
-    period_dt = datetime.strptime(period, '%Y-%m')
-    next_month = period_dt + relativedelta(months=1)
-    end_date = next_month.strftime('%Y-%m-%d')
-    
-    query = f"""
-        SELECT *
-        FROM accounts_transaction
-        WHERE date_created >= '{start_date}'
-          AND date_created < '{end_date}'
-        ORDER BY date_created ASC
-    """
-    
+
+    url = f"{BACKEND_API_BASE.rstrip('/')}/agency/transaction-data-for-analyst"
+    params = {
+        "transaction_type": ",".join(BACKEND_TRANSACTION_TYPES),
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+    headers = {"Accept": "application/json"}
+    if BACKEND_API_TOKEN:
+        headers["X-API-KEY"] = f"{BACKEND_API_TOKEN}"
+
     try:
-        conn = psycopg2.connect(
-            host=PG_HOST,
-            port=PG_PORT,
-            database=PG_DATABASE,
-            user=PG_USER,
-            password=PG_PASSWORD,
-            connect_timeout=30
-        )
-        
-        df = pd.read_sql_query(query, conn)
-        conn.close()
-        
-        print(f"✅ Fetched {len(df)} backend transactions for {period}")
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+        transactions = payload.get("transactions", [])
+        df = pd.DataFrame(transactions)
+
+        print(f"✅ Fetched {len(df)} backend transactions for {start_date} to {end_date}")
         return df
-        
-    except psycopg2.OperationalError as e:
+
+    except requests.Timeout as e:
         raise HTTPException(
-            status_code=503,
-            detail=f"Cannot connect to the Database. Check your Internet: {str(e)}"
+            status_code=504,
+            detail=f"Backend API timeout. Check your Internet: {str(e)}"
         )
+    except requests.RequestException as e:
+        raise HTTPException(status_code=502, detail=f"Backend API error: {str(e)}")
+    except ValueError as e:
+        raise HTTPException(status_code=502, detail=f"Backend API invalid JSON: {str(e)}")
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Backend API unexpected error: {str(e)}")
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -343,13 +343,14 @@ class ReconciliationEngine:
 # AI ANALYZER
 # ─────────────────────────────────────────────────────────────────
 
-def analyze_with_ai(engine: ReconciliationEngine, period: str) -> str:
+def analyze_with_ai(engine: ReconciliationEngine, start_date: str, end_date: str) -> str:
     send_unmatched = engine.results.get('send_bank_unmatched', pd.DataFrame())
     fund_unmatched = engine.results.get('fund_unmatched', pd.DataFrame())
     bank_unmatched = engine.results.get('bank_unmatched', pd.DataFrame())
+    range_label = f"{start_date} to {end_date}"
     
     prompt = f"""
-Analyze bank reconciliation for Liberty Assured Agency Banking ({period}):
+Analyze bank reconciliation for Liberty Assured Agency Banking ({range_label}):
 
 BACKEND NOT ON BANK:
 - SEND_BANK_TRANSFER: {len(send_unmatched)} transactions
@@ -392,55 +393,69 @@ async def root():
         "service": "Agency Banking Reconciliation API",
         "version": "1.0.0",
         "status": "online",
-        "database_configured": bool(PG_HOST and PG_DATABASE),
+        "backend_api_configured": bool(BACKEND_API_BASE),
         "ai_configured": bool(ANTHROPIC_API_KEY),
         "endpoints": {
-            "POST /reconcile": "Run reconciliation (fetches backend from Postgres)",
-            "GET /test-db": "Test Postgres connection",
+            "POST /reconcile": "Run reconciliation (fetches backend from API)",
+            "GET /test-backend": "Test backend API connection",
             "GET /health": "Health check"
         }
     }
 
 
-@app.get("/test-db")
-async def test_db():
-    """Test Postgres connection"""
+@app.get("/test-backend")
+async def test_backend():
+    """Test backend API connection"""
     try:
-        conn = psycopg2.connect(
-            host=PG_HOST, port=PG_PORT, database=PG_DATABASE,
-            user=PG_USER, password=PG_PASSWORD, connect_timeout=10
-        )
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM accounts_transaction")
-        count = cursor.fetchone()[0]
-        conn.close()
-        
+        start_date = datetime.now().strftime("%Y-%m-20")
+        end_date = datetime.now().strftime("%Y-%m-%d")
+        print(f"Testing backend API connection with date range {start_date} to {end_date}...")
+        url = f"{BACKEND_API_BASE.rstrip('/')}/agency/transaction-data-for-analyst"
+        params = {
+            "transaction_type": ",".join(BACKEND_TRANSACTION_TYPES),
+            "start_date": start_date,
+            "end_date": end_date,
+        }
+        headers = {"Accept": "application/json"}
+        if BACKEND_API_TOKEN:
+            headers["X-API-KEY"] = f"{BACKEND_API_TOKEN}"
+
+        response = requests.get(url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+        count = payload.get("count", 0)
+
         return {
             "status": "connected",
-            "database": PG_DATABASE,
-            "host": PG_HOST,
+            "backend_api": BACKEND_API_BASE,
             "total_transactions": f"{count:,}"
         }
     except Exception as e:
-        raise HTTPException(503, detail=f"DB connection failed: {str(e)}")
+        raise HTTPException(503, detail=f"Backend API connection failed: {str(e)}")
 
 
 @app.post("/reconcile", response_model=ReconcileResponse)
 async def reconcile(request: ReconcileRequest):
     """
     Main endpoint - Make.com sends ONLY bank statement.
-    API fetches backend from Postgres automatically.
+    API fetches backend from API automatically.
     """
-    
-    run_id = f"RUN_{request.period}_{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:6].upper()}"
+
+    run_id = (
+        f"RUN_{request.start_date}_to_{request.end_date}_"
+        f"{datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:6].upper()}"
+    )
     
     try:
-        # 1. Fetch backend from Postgres
-        print(f"🔄 Fetching backend from Postgres for {request.period}...")
-        backend_df = get_backend_data_from_postgres(request.period)
+        # 1. Fetch backend from API
+        print(f"🔄 Fetching backend from API for {request.start_date} to {request.end_date}...")
+        backend_df = get_backend_data_from_api(request.start_date, request.end_date)
         
         if backend_df.empty:
-            raise HTTPException(404, detail=f"No backend data for {request.period}")
+            raise HTTPException(
+                404,
+                detail=f"No backend data for {request.start_date} to {request.end_date}"
+            )
         
         # 2. Convert bank data from Make.com
         bank_df = pd.DataFrame(request.bank_data)
@@ -458,11 +473,12 @@ async def reconcile(request: ReconcileRequest):
         ai_analysis = None
         if request.run_ai_analysis and ANTHROPIC_API_KEY:
             print("🤖 Running AI...")
-            ai_analysis = analyze_with_ai(engine, request.period)
+            ai_analysis = analyze_with_ai(engine, request.start_date, request.end_date)
         
         return ReconcileResponse(
             run_id=run_id,
-            period=request.period,
+            start_date=request.start_date,
+            end_date=request.end_date,
             status="complete",
             summary=summary,
             ai_analysis=ai_analysis,
@@ -482,7 +498,7 @@ async def health():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "postgres_configured": bool(PG_HOST and PG_USER),
+        "backend_api_configured": bool(BACKEND_API_BASE),
         "ai_configured": bool(ANTHROPIC_API_KEY)
     }
 
