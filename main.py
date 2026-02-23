@@ -72,6 +72,7 @@ class ReconcileResponse(BaseModel):
     ai_analysis: Optional[str] = None
     backend_count: int
     bank_count: int
+    unmatched: Optional[Dict[str, List[Dict]]] = None
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -140,7 +141,7 @@ class ReconciliationEngine:
         trans = self.backend.copy()
         
         # Dates
-        trans['date_created'] = pd.to_datetime(trans['date_created'], errors='coerce')
+        trans['date_created'] = pd.to_datetime(trans.get('date_created'), errors='coerce')
         
         # Commissions & stamp duty
         trans['commissions'] = 0
@@ -148,13 +149,16 @@ class ReconciliationEngine:
         trans.loc[trans['transaction_type'] == 'SEND_LIBERTY_COMMISSION', 'commissions'] = trans['amount']
         trans.loc[trans['transaction_type'] == 'ELECTRONIC_TRANSFER_LEVY', 'stamp_duty'] = trans['amount']
         
-        # Split ref_1 and ref_2
+        # Normalize identifiers
         mask = trans['transaction_type'].isin(['SEND_BANK_TRANSFER', 'SEND_LIBERTY_COMMISSION'])
         trans.loc[mask, 'ref_1'] = trans.loc[mask, 'unique_reference'].astype(str).str[:9]
         trans.loc[mask, 'ref_2'] = trans.loc[mask, 'unique_reference'].astype(str).str[10:]
+        trans['session_id'] = trans.get('session_id', '').fillna('').astype(str)
+        trans['transaction_id'] = trans.get('transaction_id', '').fillna('').astype(str)
+        trans['escrow_id'] = trans.get('escrow_id', '').fillna('').astype(str)
         
         # Fill NaN
-        for col in ['provider_fee', 'commissions', 'stamp_duty', 'balance_before', 'balance_after']:
+        for col in ['provider_fee', 'commissions', 'stamp_duty', 'balance_before', 'balance_after', 'amount']:
             if col in trans.columns:
                 trans[col] = trans[col].fillna(0)
         
@@ -174,8 +178,27 @@ class ReconciliationEngine:
             bank = bank.rename(columns={'created_at': 'transaction_date'})
         
         # Convert dates
-        bank['transaction_date'] = pd.to_datetime(bank['transaction_date'], errors='coerce')
+        bank['transaction_date'] = pd.to_datetime(bank.get('transaction_date'), errors='coerce')
+
+        # Normalize identifiers
+        bank['transaction_id'] = bank.get('transaction_id', '').fillna('').astype(str)
+        bank['session_id'] = bank.get('session_id', '').fillna('').astype(str)
+        bank['narration'] = bank.get('narration', '').fillna('').astype(str)
+
+        # Extract a fallback transaction id from narration for reversals
+        bank['narration_txn_id'] = bank['narration'].str.extract(r"\b([A-Z0-9]{10,})\b", expand=False)
+        bank['narration_txn_id'] = bank['narration_txn_id'].fillna('')
         
+        # Normalize amounts
+        if 'debit' in bank.columns:
+            bank['debit'] = pd.to_numeric(bank['debit'], errors='coerce').fillna(0)
+        else:
+            bank['debit'] = 0
+        if 'credit' in bank.columns:
+            bank['credit'] = pd.to_numeric(bank['credit'], errors='coerce').fillna(0)
+        else:
+            bank['credit'] = 0
+
         # Extract charges & stamp duty
         if 'debit' in bank.columns and 'narration' in bank.columns:
             bank['charges'] = bank['debit'].where(
@@ -230,22 +253,38 @@ class ReconciliationEngine:
         return matched, unmatched
     
     def reconcile_reversals(self):
-        unmatched = self.results.get('send_bank_unmatched', pd.DataFrame())
-        if unmatched.empty:
-            return pd.DataFrame()
-        
+        bank = self.bank_prepared
         reversals = self.backend_prepared[
             self.backend_prepared['transaction_type'] == 'REVERSAL_BANK_TRANSFER'
-        ]
-        
-        mapped = pd.merge(
-            unmatched,
-            reversals[['date_created', 'transaction_type', 'escrow_id', 'amount']],
-            how='left', on='escrow_id', suffixes=('', '_reversal')
+        ].copy()
+
+        if reversals.empty:
+            self.results['reversal_matched'] = pd.DataFrame()
+            self.results['reversal_unmatched'] = pd.DataFrame()
+            return pd.DataFrame()
+
+        bank_deposits = bank[(bank.get('credit', 0) > 0)].copy()
+
+        # Match by transaction id (bank column or narration fallback)
+        bank_deposits['txn_match_id'] = bank_deposits['transaction_id']
+        bank_deposits.loc[bank_deposits['txn_match_id'] == '', 'txn_match_id'] = bank_deposits['narration_txn_id']
+
+        reversals['transaction_id'] = reversals.get('transaction_id', '').astype(str)
+        merged = bank_deposits.merge(
+            reversals,
+            how='left',
+            left_on='txn_match_id',
+            right_on='transaction_id',
+            suffixes=('_bank', '')
         )
-        
-        self.results['send_reversal_mapped'] = mapped
-        return mapped
+
+        merged['match_reversal'] = merged['transaction_id'].ne('')
+        matched = merged[merged['match_reversal'] == True]
+        unmatched = merged[merged['match_reversal'] == False]
+
+        self.results['reversal_matched'] = matched
+        self.results['reversal_unmatched'] = unmatched
+        return matched
     
     def reconcile_fund_transfers(self):
         trans = self.backend_prepared
@@ -255,14 +294,14 @@ class ReconciliationEngine:
         if fund.empty:
             return pd.DataFrame(), pd.DataFrame()
         
-        vfd = fund[fund.get('account_provider', '') == 'VFD']
+        vfd = fund[fund.get('account_provider', '') == 'VFD'].copy()
         
-        bank['session_id'] = bank.get('session_id', '').fillna('Nan')
+        bank['session_id'] = bank.get('session_id', '').fillna('')
         vfd['session_id'] = vfd['session_id'].astype(str)
         bank['session_id'] = bank['session_id'].astype(str)
         
-        # Prefer credits
-        bank_credits = bank.sort_values(
+        # Prefer highest credit per session id for main transfer
+        bank_credits = bank[bank.get('credit', 0) > 0].sort_values(
             by=['session_id', 'credit'], ascending=[True, False]
         ).drop_duplicates(subset=['session_id'], keep='first')
         
@@ -279,6 +318,36 @@ class ReconciliationEngine:
         self.results['fund_unmatched'] = unmatched
         
         return matched, unmatched
+
+    def reconcile_failed_backend_transfers(self):
+        trans = self.backend_prepared
+        if trans.empty:
+            self.results['failed_backend_matched'] = pd.DataFrame()
+            return pd.DataFrame()
+
+        send_no_session = trans[
+            (trans['transaction_type'] == 'SEND_BANK_TRANSFER') &
+            (trans['session_id'] == '')
+        ].copy()
+
+        reversals_no_session = trans[
+            (trans['transaction_type'] == 'REVERSAL_BANK_TRANSFER') &
+            (trans['session_id'] == '')
+        ].copy()
+
+        if send_no_session.empty or reversals_no_session.empty:
+            self.results['failed_backend_matched'] = pd.DataFrame()
+            return pd.DataFrame()
+
+        mapped = send_no_session.merge(
+            reversals_no_session[['escrow_id', 'amount', 'date_created']],
+            how='left',
+            on='escrow_id',
+            suffixes=('', '_reversal')
+        )
+
+        self.results['failed_backend_matched'] = mapped
+        return mapped
     
     def reconcile_bank_to_backend(self):
         trans = self.backend_prepared
@@ -317,6 +386,7 @@ class ReconciliationEngine:
         self.reconcile_send_bank_transfers()
         self.reconcile_reversals()
         self.reconcile_fund_transfers()
+        self.reconcile_failed_backend_transfers()
         self.reconcile_bank_to_backend()
         return self.build_summary()
     
@@ -324,6 +394,7 @@ class ReconciliationEngine:
         send_unmatched_amt = self.results.get('send_bank_unmatched', pd.DataFrame()).get('amount', pd.Series([0])).sum()
         fund_unmatched_amt = self.results.get('fund_unmatched', pd.DataFrame()).get('amount', pd.Series([0])).sum()
         bank_unmatched_amt = self.results.get('bank_unmatched', pd.DataFrame()).get('debit', pd.Series([0])).sum()
+        reversal_unmatched_amt = self.results.get('reversal_unmatched', pd.DataFrame()).get('credit', pd.Series([0])).sum()
         
         return {
             'total_backend_transactions': len(self.backend),
@@ -335,7 +406,10 @@ class ReconciliationEngine:
             'bank_to_backend_matched': len(self.results.get('bank_matched', [])),
             'bank_to_backend_unmatched': len(self.results.get('bank_unmatched', [])),
             'total_unmatched_backend_value': float(send_unmatched_amt + fund_unmatched_amt),
-            'total_unmatched_bank_value': float(bank_unmatched_amt)
+            'total_unmatched_bank_value': float(bank_unmatched_amt + reversal_unmatched_amt),
+            'reversal_matched': len(self.results.get('reversal_matched', [])),
+            'reversal_unmatched': len(self.results.get('reversal_unmatched', [])),
+            'failed_backend_mapped': len(self.results.get('failed_backend_matched', []))
         }
 
 
@@ -475,6 +549,13 @@ async def reconcile(request: ReconcileRequest):
             print("🤖 Running AI...")
             ai_analysis = analyze_with_ai(engine, request.start_date, request.end_date)
         
+        unmatched_payload = {
+            "backend_only_send": engine.results.get("send_bank_unmatched", pd.DataFrame()).to_dict("records"),
+            "backend_only_fund": engine.results.get("fund_unmatched", pd.DataFrame()).to_dict("records"),
+            "bank_only": engine.results.get("bank_unmatched", pd.DataFrame()).to_dict("records"),
+            "reversal_unmatched": engine.results.get("reversal_unmatched", pd.DataFrame()).to_dict("records"),
+        }
+
         return ReconcileResponse(
             run_id=run_id,
             start_date=request.start_date,
@@ -483,7 +564,8 @@ async def reconcile(request: ReconcileRequest):
             summary=summary,
             ai_analysis=ai_analysis,
             backend_count=len(backend_df),
-            bank_count=len(bank_df)
+            bank_count=len(bank_df),
+            unmatched=unmatched_payload
         )
         
     except HTTPException:
