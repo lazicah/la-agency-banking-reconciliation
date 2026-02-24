@@ -53,6 +53,30 @@ BACKEND_API_TOKEN = os.getenv("BACKEND_API_KEY", "")
 
 
 # ─────────────────────────────────────────────────────────────────
+# UTILITIES
+# ─────────────────────────────────────────────────────────────────
+
+def convert_to_native_python(obj):
+    """
+    Recursively convert numpy types to Python native types for JSON serialization.
+    """
+    if isinstance(obj, dict):
+        return {key: convert_to_native_python(val) for key, val in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_to_native_python(item) for item in obj]
+    elif isinstance(obj, np.integer):
+        return int(obj)
+    elif isinstance(obj, np.floating):
+        return float(obj)
+    elif isinstance(obj, np.bool_):
+        return bool(obj)
+    elif pd.isna(obj):
+        return None
+    else:
+        return obj
+
+
+# ─────────────────────────────────────────────────────────────────
 # REQUEST/RESPONSE MODELS
 # ─────────────────────────────────────────────────────────────────
 
@@ -397,19 +421,19 @@ class ReconciliationEngine:
         reversal_unmatched_amt = self.results.get('reversal_unmatched', pd.DataFrame()).get('credit', pd.Series([0])).sum()
         
         return {
-            'total_backend_transactions': len(self.backend),
-            'total_bank_transactions': len(self.bank),
-            'send_bank_matched': len(self.results.get('send_bank_matched', [])),
-            'send_bank_unmatched': len(self.results.get('send_bank_unmatched', [])),
-            'fund_matched': len(self.results.get('fund_matched', [])),
-            'fund_unmatched': len(self.results.get('fund_unmatched', [])),
-            'bank_to_backend_matched': len(self.results.get('bank_matched', [])),
-            'bank_to_backend_unmatched': len(self.results.get('bank_unmatched', [])),
-            'total_unmatched_backend_value': float(send_unmatched_amt + fund_unmatched_amt),
-            'total_unmatched_bank_value': float(bank_unmatched_amt + reversal_unmatched_amt),
-            'reversal_matched': len(self.results.get('reversal_matched', [])),
-            'reversal_unmatched': len(self.results.get('reversal_unmatched', [])),
-            'failed_backend_mapped': len(self.results.get('failed_backend_matched', []))
+            'total_backend_transactions': int(len(self.backend)),
+            'total_bank_transactions': int(len(self.bank)),
+            'send_bank_matched': int(len(self.results.get('send_bank_matched', []))),
+            'send_bank_unmatched': int(len(self.results.get('send_bank_unmatched', []))),
+            'fund_matched': int(len(self.results.get('fund_matched', []))),
+            'fund_unmatched': int(len(self.results.get('fund_unmatched', []))),
+            'bank_to_backend_matched': int(len(self.results.get('bank_matched', []))),
+            'bank_to_backend_unmatched': int(len(self.results.get('bank_unmatched', []))),
+            'total_unmatched_backend_value': float(send_unmatched_amt) + float(fund_unmatched_amt),
+            'total_unmatched_bank_value': float(bank_unmatched_amt) + float(reversal_unmatched_amt),
+            'reversal_matched': int(len(self.results.get('reversal_matched', []))),
+            'reversal_unmatched': int(len(self.results.get('reversal_unmatched', []))),
+            'failed_backend_mapped': int(len(self.results.get('failed_backend_matched', [])))
         }
 
 
@@ -550,10 +574,10 @@ async def reconcile(request: ReconcileRequest):
             ai_analysis = analyze_with_ai(engine, request.start_date, request.end_date)
         
         unmatched_payload = {
-            "backend_only_send": engine.results.get("send_bank_unmatched", pd.DataFrame()).to_dict("records"),
-            "backend_only_fund": engine.results.get("fund_unmatched", pd.DataFrame()).to_dict("records"),
-            "bank_only": engine.results.get("bank_unmatched", pd.DataFrame()).to_dict("records"),
-            "reversal_unmatched": engine.results.get("reversal_unmatched", pd.DataFrame()).to_dict("records"),
+            "backend_only_send": convert_to_native_python(engine.results.get("send_bank_unmatched", pd.DataFrame()).to_dict("records")),
+            "backend_only_fund": convert_to_native_python(engine.results.get("fund_unmatched", pd.DataFrame()).to_dict("records")),
+            "bank_only": convert_to_native_python(engine.results.get("bank_unmatched", pd.DataFrame()).to_dict("records")),
+            "reversal_unmatched": convert_to_native_python(engine.results.get("reversal_unmatched", pd.DataFrame()).to_dict("records")),
         }
 
         return ReconcileResponse(
@@ -561,7 +585,7 @@ async def reconcile(request: ReconcileRequest):
             start_date=request.start_date,
             end_date=request.end_date,
             status="complete",
-            summary=summary,
+            summary=convert_to_native_python(summary),
             ai_analysis=ai_analysis,
             backend_count=len(backend_df),
             bank_count=len(bank_df),
