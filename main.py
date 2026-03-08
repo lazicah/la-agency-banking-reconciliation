@@ -23,6 +23,7 @@ import os
 import traceback
 import requests
 from dotenv import load_dotenv
+from card_reconciliation.card_main import router as card_reconciliation_router
 load_dotenv()
 
 
@@ -39,6 +40,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+CARD_RECONCILIATION_PREFIX = "/card-reconciliation"
+app.include_router(card_reconciliation_router, prefix=CARD_RECONCILIATION_PREFIX)
 
 # ─────────────────────────────────────────────────────────────────
 # CONFIG — Set as environment variables in Railway/Render
@@ -493,10 +497,14 @@ async def root():
         "status": "online",
         "backend_api_configured": bool(BACKEND_API_BASE),
         "ai_configured": bool(ANTHROPIC_API_KEY),
+        "card_reconciliation_included": True,
+        "card_reconciliation_prefix": CARD_RECONCILIATION_PREFIX,
         "endpoints": {
             "POST /reconcile": "Run reconciliation (fetches backend from API)",
             "GET /test-backend": "Test backend API connection",
-            "GET /health": "Health check"
+            "GET /health": "Health check",
+            "POST /card-reconciliation/reconciliation/run": "Run card reconciliation",
+            "GET /docs": "Unified API docs (includes card reconciliation routes)"
         }
     }
 
@@ -605,7 +613,8 @@ async def health():
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "backend_api_configured": bool(BACKEND_API_BASE),
-        "ai_configured": bool(ANTHROPIC_API_KEY)
+        "ai_configured": bool(ANTHROPIC_API_KEY),
+        "card_reconciliation_included": True
     }
 
 

@@ -8,3 +8,11 @@ anthropic==0.83.0
 python-multipart==0.0.9
 python-dateutil==2.8.2
 requests==2.32.3
+python-dotenv==1.0.0
+gspread==5.12.3
+google-auth==2.26.2
+google-auth-oauthlib==1.2.0
+google-auth-httplib2==0.2.0
+openai>=2.24.0
+pydantic-settings==2.1.0
+schedule==1.2.0
